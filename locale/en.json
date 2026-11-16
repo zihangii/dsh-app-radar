@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "App Radar",
+    "description": "A console for every process and port DSH started in the background: uptime, memory, working directory, and one-click force stop."
+  }
+}

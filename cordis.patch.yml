@@ -1,0 +1,5 @@
+# 应用雷达：Host 半边提供进程扫描/强制停止接口和 app_radar 工具；
+# 浏览器半边（侧栏入口 + 主区域控制台）由 package.json 的 dsh.client 声明加载。
+- insert:
+    - id: app-radar
+      name: dsh-app-radar
