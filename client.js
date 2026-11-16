@@ -9,7 +9,8 @@
  * 产品思路参考 laogou717/local-ops（MIT），代码为独立实现，详见 CREDITS.md。
  */
 window.__ModuleLoader__.load({
-  id: '@local/dsh-app-radar',
+  // 必须与 package.json 的 name 一致：客户端模块表按包名索引 factory
+  id: 'dsh-app-radar',
   factory: (require) => {
     var module = { exports: {} }
     var exports = module.exports

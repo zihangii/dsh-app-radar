@@ -1,6 +1,6 @@
 {
   "name": "dsh-app-radar",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "应用雷达：把 DSH 在后台启动的进程和端口列成一张控制台，一键强制停止。",
   "type": "module",
   "main": "index.js",
