@@ -4,6 +4,16 @@ DSH 帮你改代码、跑项目时，经常会在后台留下 `npm run dev`、`v
 之类的长期进程。跑多了以后端口占了一堆，谁也说不清到底起了多少、哪个是 DSH 起的、还能不能停。
 **应用雷达**就是给这件事做的一块控制台：侧栏点开，一次看清，一键收掉。
 
+## 长这样
+
+| 只看 DSH 启动的 | 停止前二次确认 |
+| --- | --- |
+| ![应用雷达](assets/screenshots/01-radar.png) | ![停止确认](assets/screenshots/02-stop-confirm.png) |
+
+![全部进程](assets/screenshots/03-all-processes.png)
+
+> 截图里的项目名、路径和 PID 都是演示数据（`/Users/demo/...`），不是任何人的真实进程。
+
 ## 它能做什么
 
 - **一个页面看全**：侧栏多一个雷达图标，主区域是一整页控制台，列出后台进程的端口、项目名、
@@ -63,6 +73,8 @@ client.js           浏览器半边：侧栏入口 + 主区域控制台（React�
 cordis.patch.yml    把插件插进 profile 的 Loader 补丁
 locale/{zh,en}.json 插件列表里的标题和说明
 assets/icon-180.png 市场卡片图标（位图）；icon.svg 是 dsh 插件列表用的矢量图
+assets/screenshots/ 市场详情页截图（演示数据）
+screenshots.json    告诉插件市场要展示哪几张截图
 ```
 
 ## 致谢 / Credits

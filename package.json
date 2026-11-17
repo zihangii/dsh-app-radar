@@ -21,7 +21,9 @@
     "assets/icon-180.png",
     "README.md",
     "CREDITS.md",
-    "LICENSE"
+    "LICENSE",
+    "screenshots.json",
+    "assets/screenshots/*.png"
   ],
   "dsh": {
     "bundle": {
