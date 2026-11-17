@@ -6,11 +6,11 @@ DSH 帮你改代码、跑项目时，经常会在后台留下 `npm run dev`、`v
 
 ## 长这样
 
-| 只看 DSH 启动的 | 停止前二次确认 |
+| 一眼看清有几棵树 | 展开看树里的进程 |
 | --- | --- |
-| ![应用雷达](assets/screenshots/01-radar.png) | ![停止确认](assets/screenshots/02-stop-confirm.png) |
+| ![应用雷达](assets/screenshots/01-radar.png) | ![展开启动树](assets/screenshots/02-tree.png) |
 
-![全部进程](assets/screenshots/03-all-processes.png)
+![停止整棵启动树](assets/screenshots/03-stop-confirm.png)
 
 > 截图里的项目名、路径和 PID 都是演示数据（`/Users/demo/...`），不是任何人的真实进程。
 
@@ -18,11 +18,14 @@ DSH 帮你改代码、跑项目时，经常会在后台留下 `npm run dev`、`v
 
 - **一个页面看全**：侧栏多一个雷达图标，主区域是一整页控制台，列出后台进程的端口、项目名、
   启动者（DSH / 外部）、运行时长、内存、CPU、工作目录。
+- **一条命令算一棵树**：`pnpm dev` 这类命令会拉出一长串进程（pnpm → turbo → 每个包一个 dev →
+  每个 dev 一个端口），进程组还被 turbo 拆成好几个。面板按「宿主进程的直接子进程」把整条链
+  归并成一行启动树：端口取并集、内存求和，点开能看到每个成员，停的时候一次收掉整棵树。
 - **说清是谁起的**：靠两条线索判断「DSH 启动」——进程树的父链能不能走到 DSH 自己，
   以及进程环境变量里有没有 `DSH_SESSION_ID`（子进程会继承，所以哪怕被 `nohup` 甩到
   后台也能认出来）。
-- **强制停止**：每一行都有停止按钮，走「SIGTERM → 等 900ms → 仍在就 SIGKILL」，
-  默认停**整个进程组**，`npm run dev` 带出来的那串子进程会一起收掉。
+- **强制停止**：单棵启动树走「逐个进程 SIGTERM → 等 900ms → 仍在就 SIGKILL」，
+  **不做进程组升级**（同一进程组里可能有别的命令）；单个进程停止时才会整组停。
 - **一键全部停止**：把当前所有「DSH 启动」的进程一起收掉，不碰外部进程，也不碰 DSH 本体。
 - **给模型一个工具**：`app_radar`，`action=list / kill / stop_all`。UI 和工具走同一份核心实现，
   行为一致。
@@ -73,7 +76,7 @@ client.js           浏览器半边：侧栏入口 + 主区域控制台（React�
 cordis.patch.yml    把插件插进 profile 的 Loader 补丁
 locale/{zh,en}.json 插件列表里的标题和说明
 assets/icon-180.png 市场卡片图标（位图）；icon.svg 是 dsh 插件列表用的矢量图
-assets/screenshots/ 市场详情页截图（演示数据）
+assets/screenshots/ 市场详情页截图（演示数据：一棵 12 进程的 monorepo 启动树）
 screenshots.json    告诉插件市场要展示哪几张截图
 ```
 

@@ -46,6 +46,14 @@ window.__ModuleLoader__.load({
         dshOrigin: 'DSH',
         externalOrigin: '外部',
         stopAll: '全部停止',
+        stopTree: '停止全部',
+        expandHint: '展开这棵树里的进程',
+        collapseHint: '收起',
+        confirmTreeTitle: '停止整棵启动树？',
+        confirmProcTitle: '强制停止这个进程？',
+        procsSub: '个进程',
+        treeNote: '会逐个进程停止（不做进程组升级），避免连带停掉同一进程组里的其他命令。',
+        memberPid: '进程',
         stopAllTitle: '停止所有由 DSH 启动的进程',
         confirmTitle: '强制停止这个进程？',
         confirmKill: '停止',
@@ -86,6 +94,14 @@ window.__ModuleLoader__.load({
         dshOrigin: 'DSH',
         externalOrigin: 'external',
         stopAll: 'Stop all',
+        stopTree: 'Stop tree',
+        expandHint: 'Expand the processes in this tree',
+        collapseHint: 'Collapse',
+        confirmTreeTitle: 'Stop the whole process tree?',
+        confirmProcTitle: 'Force-stop this process?',
+        procsSub: 'processes',
+        treeNote: 'Stops each process individually (no process-group escalation), so unrelated commands in the same group are left alone.',
+        memberPid: 'PID',
         stopAllTitle: 'Stop every process started by DSH',
         confirmTitle: 'Force-stop this process?',
         confirmKill: 'Stop',
@@ -194,6 +210,7 @@ window.__ModuleLoader__.load({
   background: var(--dsw-alias-bg-layer-1); }
 .ar-stat-v { font-size: 20px; font-weight: 650; line-height: 1.15; font-variant-numeric: tabular-nums; }
 .ar-stat-l { margin-top: 2px; font-size: 11px; color: var(--dsw-alias-label-secondary); }
+.ar-stat-s { margin-top: 1px; font-size: 10.5px; color: var(--dsw-alias-label-secondary); opacity: .75; }
 .ar-stat.ar-accent .ar-stat-v { color: var(--dsw-alias-brand-primary); }
 .ar-tabs { display: flex; gap: 6px; margin-bottom: 12px; flex-wrap: wrap; align-items: center; }
 .ar-tab { height: 26px; padding: 0 11px; border-radius: 999px; font-size: 12px; cursor: pointer;
@@ -217,6 +234,19 @@ window.__ModuleLoader__.load({
 .ar-port:hover { background: color-mix(in srgb, var(--dsw-alias-brand-primary) 24%, transparent); }
 .ar-noport { font-size: 11px; color: var(--dsw-alias-label-secondary); }
 .ar-proj { font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ar-proj-line { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.ar-chip { font: inherit; font-size: 10.5px; height: 18px; padding: 0 7px; border-radius: 999px; cursor: pointer;
+  border: 1px solid var(--dsw-alias-border-l2); background: transparent; color: var(--dsw-alias-label-secondary);
+  display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; flex: 0 0 auto; }
+.ar-chip:hover { background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary); }
+.ar-chip-open { color: var(--dsw-alias-label-primary); border-color: var(--dsw-alias-brand-primary); }
+.ar-caret { font-size: 9px; line-height: 1; opacity: .85; }
+.ar-member { background: color-mix(in srgb, var(--dsw-alias-bg-layer-2) 45%, transparent); }
+.ar-member .ar-proj { font-weight: 450; font-size: 12px; }
+.ar-proj-sub { padding-left: 9px; border-left: 2px solid var(--dsw-alias-border-l2); }
+.ar-mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }
+.ar-dialog-note { margin-top: 10px; padding-top: 9px; border-top: 1px dashed var(--dsw-alias-border-l1);
+  font-size: 11.5px; line-height: 1.6; color: var(--dsw-alias-label-secondary); }
 .ar-cmd { margin-top: 2px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px;
   color: var(--dsw-alias-label-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ar-badge { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; padding: 2px 8px;
@@ -303,6 +333,7 @@ window.__ModuleLoader__.load({
       const [confirm, setConfirm] = React.useState(null)
       const [confirmAll, setConfirmAll] = React.useState(false)
       const [toast, setToast] = React.useState(null)
+      const [expanded, setExpanded] = React.useState(() => new Set())
       const alive = React.useRef(true)
 
       React.useEffect(() => () => { alive.current = false }, [])
@@ -338,18 +369,25 @@ window.__ModuleLoader__.load({
       }, [toast])
 
       const rows = (snap && snap.rows) || []
-      const visible = filter === 'all' ? rows : rows.filter((r) => r.origin === 'dsh')
-      const summary = (snap && snap.summary) || { total: 0, dsh: 0, ports: 0, rssMB: 0 }
+      const groups = (snap && snap.groups) || rows.map((r) => ({
+        ...r, treeId: r.treeId || r.id, rootPid: r.pid, procCount: 1, memberPids: [r.pid],
+      }))
+      const summary = (snap && snap.summary) || { total: 0, dsh: 0, groups: 0, dshGroups: 0, ports: 0, rssMB: 0 }
+      const visible = filter === 'all' ? groups : groups.filter((g) => g.origin === 'dsh')
 
-      const stop = async (row, force) => {
-        setBusy(row.pid)
+      const runStop = async (mode, target, force) => {
+        const row = target.row
+        const group = target.group
+        setBusy(mode === 'tree' ? `tree:${group.treeId}` : `pid:${row ? row.pid : group.rootPid}`)
         try {
-          const result = await callApi('kill', { pid: row.pid, force: Boolean(force) })
+          const result = mode === 'tree'
+            ? await callApi('killTree', { treeId: group.treeId, force: Boolean(force) })
+            : await callApi('kill', { pid: row ? row.pid : group.rootPid, force: Boolean(force) })
           if (result.ok) {
-            setToast({ kind: 'ok', text: result.message || `${t.stoppedOk} ${row.label || row.pid}` })
+            setToast({ kind: 'ok', text: result.message || t.stoppedOk })
             setConfirm(null)
           } else if (result.needsForce) {
-            setToast({ kind: 'bad', text: result.message, forceRow: row })
+            setToast({ kind: 'bad', text: result.message, forceTarget: { mode, target } })
             setConfirm(null)
           } else {
             setToast({ kind: 'bad', text: result.message || t.failed })
@@ -376,12 +414,13 @@ window.__ModuleLoader__.load({
         }
       }
 
-      const stat = (value, label, accent) => h('div', { className: `ar-stat${accent ? ' ar-accent' : ''}` },
+      const stat = (value, label, accent, sub) => h('div', { className: `ar-stat${accent ? ' ar-accent' : ''}` },
         h('div', { className: 'ar-stat-v' }, value),
-        h('div', { className: 'ar-stat-l' }, label))
+        h('div', { className: 'ar-stat-l' }, label),
+        sub ? h('div', { className: 'ar-stat-s' }, sub) : null)
 
-      const portCell = (row) => row.ports.length
-        ? h('div', { className: 'ar-ports' }, row.ports.map((port) => h('a', {
+      const portCell = (ports) => ports && ports.length
+        ? h('div', { className: 'ar-ports' }, ports.map((port) => h('a', {
           key: port,
           className: 'ar-port',
           href: `http://127.0.0.1:${port}`,
@@ -399,6 +438,67 @@ window.__ModuleLoader__.load({
         h('div', { className: 'ar-col-mem' }, t.colMemory),
         h('div', { className: 'ar-right' }, t.colAction))
 
+      const toggleExpand = (treeId) => {
+        setExpanded((prev) => {
+          const next = new Set(prev)
+          if (next.has(treeId)) next.delete(treeId)
+          else next.add(treeId)
+          return next
+        })
+      }
+
+      const groupNode = (g) => {
+        const isMulti = (g.procCount || 1) > 1
+        const open = expanded.has(g.treeId)
+        return h('div', { key: g.id, className: 'ar-tr ar-row' },
+          h('div', null, portCell(g.ports)),
+          h('div', { style: { minWidth: 0 } },
+            h('div', { className: 'ar-proj-line' },
+              h('div', { className: 'ar-proj', title: g.command || '' }, g.label || `pid ${g.rootPid}`),
+              isMulti ? h('button', {
+                className: `ar-chip${open ? ' ar-chip-open' : ''}`,
+                onClick: () => toggleExpand(g.treeId),
+                title: open ? t.collapseHint : t.expandHint,
+              },
+                h('span', null, `${g.procCount} ${t.procsSub}`),
+                h('span', { className: 'ar-caret' }, open ? '▾' : '▸')) : null),
+            h('div', { className: 'ar-cmd', title: g.command || '' }, g.command || '')),
+          h('div', null,
+            h('span', { className: `ar-badge ${g.origin === 'dsh' ? 'ar-b-dsh' : 'ar-b-ext'}` },
+              g.origin === 'dsh' ? t.dshOrigin : t.externalOrigin)),
+          h('div', { className: 'ar-num' }, g.etimeText || '—'),
+          h('div', { className: 'ar-num ar-col-mem' }, snap && snap.degraded ? '—' : `${g.rssMB || 0} MB`),
+          h('div', { className: 'ar-right' },
+            h('button', {
+              className: 'ar-btn ar-danger',
+              disabled: !g.killable || busy !== null,
+              title: g.killable ? undefined : g.guard,
+              onClick: () => setConfirm(isMulti ? { mode: 'tree', group: g } : { mode: 'proc', group: g }),
+            },
+              h(StopIcon, null),
+              isMulti ? t.stopTree : t.stop)))
+      }
+
+      const memberNodes = (g) => {
+        if (!expanded.has(g.treeId)) return []
+        return rows.filter((r) => r.treeId === g.treeId).map((r) => h('div', { key: r.id, className: 'ar-tr ar-row ar-member' },
+          h('div', null, portCell(r.ports)),
+          h('div', { style: { minWidth: 0 } },
+            h('div', { className: 'ar-proj ar-proj-sub', title: r.cwd || r.command || '' },
+              r.project || r.label || `pid ${r.pid}`),
+            h('div', { className: 'ar-cmd', title: r.command || '' }, r.command || '')),
+          h('div', { className: 'ar-num ar-mono' }, `pid ${r.pid}`),
+          h('div', { className: 'ar-num' }, r.etimeText || '—'),
+          h('div', { className: 'ar-num ar-col-mem' }, snap && snap.degraded ? '—' : `${r.rssMB || 0} MB`),
+          h('div', { className: 'ar-right' },
+            h('button', {
+              className: 'ar-btn ar-danger',
+              disabled: !r.killable || busy !== null,
+              title: r.killable ? undefined : r.guard,
+              onClick: () => setConfirm({ mode: 'proc', group: g, row: r }),
+            }, h(StopIcon, null), t.stop))))
+      }
+
       const body = () => {
         if (!snap) {
           return h('div', null,
@@ -415,26 +515,7 @@ window.__ModuleLoader__.load({
         }
         return h('div', { className: 'ar-table' },
           headRow,
-          visible.map((row) => h('div', { key: row.id, className: 'ar-tr ar-row' },
-            h('div', null, portCell(row)),
-            h('div', { style: { minWidth: 0 } },
-              h('div', { className: 'ar-proj', title: row.cwd || row.command || '' },
-                row.label || row.project || `pid ${row.pid}`),
-              h('div', { className: 'ar-cmd', title: row.command || '' }, row.command || '')),
-            h('div', null,
-              h('span', { className: `ar-badge ${row.origin === 'dsh' ? 'ar-b-dsh' : 'ar-b-ext'}` },
-                row.origin === 'dsh' ? t.dshOrigin : t.externalOrigin)),
-            h('div', { className: 'ar-num' }, row.etimeText || '—'),
-            h('div', { className: 'ar-num ar-col-mem' }, snap.degraded ? '—' : `${row.rssMB || 0} MB`),
-            h('div', { className: 'ar-right' },
-              h('button', {
-                className: 'ar-btn ar-danger',
-                disabled: !row.killable || busy !== null,
-                title: row.killable ? undefined : row.guard,
-                onClick: () => { setConfirm(row) },
-              },
-                h(StopIcon, null),
-                t.stop)))))
+          visible.flatMap((g) => [groupNode(g), ...memberNodes(g)]))
       }
 
       const busyAll = busy === 'all'
@@ -456,7 +537,7 @@ window.__ModuleLoader__.load({
               h(RefreshIcon, null), t.refresh),
             h('button', {
               className: 'ar-btn ar-danger',
-              disabled: busy !== null || !summary.dsh,
+              disabled: busy !== null || !(summary.dshGroups ?? summary.dsh),
               onClick: () => setConfirmAll(true),
               title: t.stopAllTitle,
             }, h(StopIcon, null), t.stopAll))),
@@ -464,13 +545,13 @@ window.__ModuleLoader__.load({
         h('div', { className: 'ar-body' },
           h('div', { className: 'ar-stats' },
             stat(summary.total, t.statTotal),
-            stat(summary.dsh, t.statDsh, true),
+            stat(summary.dshGroups ?? summary.dsh, t.statDsh, true, `${summary.dsh} ${t.procsSub}`),
             stat(summary.ports, t.statPorts),
-            stat(snap && snap.degraded ? '—' : Math.round(visible.reduce((n, r) => n + (r.rssMB || 0), 0)), t.statMemory)),
+            stat(snap && snap.degraded ? '—' : Math.round(visible.reduce((n, g) => n + (g.rssMB || 0), 0)), t.statMemory)),
 
           h('div', { className: 'ar-tabs' },
-            h('button', { className: `ar-tab${filter === 'dsh' ? ' ar-active' : ''}`, onClick: () => setFilter('dsh') }, `${t.filterDsh} ${summary.dsh}`),
-            h('button', { className: `ar-tab${filter === 'all' ? ' ar-active' : ''}`, onClick: () => setFilter('all') }, `${t.filterAll} ${summary.total}`),
+            h('button', { className: `ar-tab${filter === 'dsh' ? ' ar-active' : ''}`, onClick: () => setFilter('dsh') }, `${t.filterDsh} ${summary.dshGroups ?? summary.dsh}`),
+            h('button', { className: `ar-tab${filter === 'all' ? ' ar-active' : ''}`, onClick: () => setFilter('all') }, `${t.filterAll} ${summary.groups ?? summary.total}`),
             h('div', { className: 'ar-spacer' }),
             snap ? h('div', { className: 'ar-meta' }, `${t.lastScan} ${new Date(snap.generatedAt).toLocaleTimeString()} · ${snap.scanMs}ms`) : null),
 
@@ -483,27 +564,39 @@ window.__ModuleLoader__.load({
 
         confirm ? h('div', { className: 'ar-mask', onClick: (e) => { if (e.target === e.currentTarget) setConfirm(null) } },
           h('div', { className: 'ar-dialog' },
-            h('div', { className: 'ar-dialog-h' }, t.confirmTitle),
+            h('div', { className: 'ar-dialog-h' }, confirm.mode === 'tree' ? t.confirmTreeTitle : t.confirmProcTitle),
             h('div', { className: 'ar-dialog-b' },
               h('dl', { className: 'ar-kv' },
-                h('dt', null, t.colPort), h('dd', null, confirm.ports.length ? confirm.ports.map((p) => `:${p}`).join(' ') : t.noPort),
-                h('dt', null, t.colProject), h('dd', null, confirm.label || confirm.project || '—'),
-                h('dt', null, 'PID'), h('dd', null, `${confirm.pid}${confirm.groupKill ? ` / PGID ${confirm.pgid}` : ''}`),
-                h('dt', null, t.colUptime), h('dd', null, confirm.etimeText || '—'),
-                h('dt', null, 'CWD'), h('dd', null, confirm.cwd || '—'),
-                confirm.command ? h('dt', null, 'CMD') : null,
-                confirm.command ? h('dd', null, confirm.command) : null)),
+                h('dt', null, t.colPort),
+                h('dd', null, (() => {
+                  const ports = confirm.row ? confirm.row.ports : confirm.group.ports
+                  return ports && ports.length ? ports.map((p) => `:${p}`).join(' ') : t.noPort
+                })()),
+                h('dt', null, t.colProject),
+                h('dd', null, (confirm.row ? (confirm.row.project || confirm.row.label) : confirm.group.label) || '—'),
+                h('dt', null, 'PID'),
+                h('dd', null, confirm.mode === 'tree'
+                  ? `${confirm.group.rootPid}（${confirm.group.procCount} ${t.procsSub}）`
+                  : `${confirm.row ? confirm.row.pid : confirm.group.rootPid}${(confirm.row ? confirm.row.groupKill : false) ? ` / PGID ${confirm.row.pgid}` : ''}`),
+                h('dt', null, t.colUptime),
+                h('dd', null, (confirm.row ? confirm.row.etimeText : confirm.group.etimeText) || '—'),
+                h('dt', null, 'CWD'),
+                h('dd', null, (confirm.row ? confirm.row.cwd : confirm.group.cwd) || '—'),
+                (confirm.row ? confirm.row.command : confirm.group.command) ? h('dt', null, 'CMD') : null,
+                (confirm.row ? confirm.row.command : confirm.group.command)
+                  ? h('dd', null, confirm.row ? confirm.row.command : confirm.group.command) : null),
+              confirm.mode === 'tree' ? h('div', { className: 'ar-dialog-note' }, t.treeNote) : null),
             h('div', { className: 'ar-dialog-f' },
               h('button', { className: 'ar-btn', onClick: () => setConfirm(null) }, t.cancel),
               h('button', {
                 className: 'ar-btn ar-danger',
                 disabled: busy !== null,
-                onClick: () => stop(confirm, false),
+                onClick: () => runStop(confirm.mode, { group: confirm.group, row: confirm.row }, false),
               }, h(StopIcon, null), t.confirmKill),
               h('button', {
                 className: 'ar-btn ar-danger',
                 disabled: busy !== null,
-                onClick: () => stop(confirm, true),
+                onClick: () => runStop(confirm.mode, { group: confirm.group, row: confirm.row }, true),
               }, h(StopIcon, null), t.confirmForce)))) : null,
 
         confirmAll ? h('div', { className: 'ar-mask', onClick: (e) => { if (e.target === e.currentTarget) setConfirmAll(false) } },
@@ -517,10 +610,10 @@ window.__ModuleLoader__.load({
 
         toast ? h('div', { className: `ar-toast ${toast.kind === 'ok' ? 'ar-ok' : 'ar-bad'}` },
           h('span', null, toast.text),
-          toast.forceRow ? h('button', {
+          toast.forceTarget ? h('button', {
             className: 'ar-btn ar-danger',
             disabled: busy !== null,
-            onClick: () => stop(toast.forceRow, true),
+            onClick: () => runStop(toast.forceTarget.mode, toast.forceTarget.target, true),
           }, t.confirmForce) : null,
           h('button', { className: 'ar-toast-x', onClick: () => setToast(null), 'aria-label': t.cancel }, '×')) : null)
     }

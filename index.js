@@ -497,6 +497,65 @@ function createScanner() {
       return b.etimeSeconds - a.etimeSeconds
     })
 
+    // 归属：把每个进程挂到「宿主进程的某个直接子进程」下，形成一棵启动树。
+    // 一条 `pnpm dev` 会经由 turbo 给每个包开独立进程组，但父子链始终连着；
+    // 按树归并才是用户心里的「一个项目」，而不是一屏 helper 进程。
+    const treeRootOf = (pid) => {
+      let cur = pid
+      for (let i = 0; i < 64; i += 1) {
+        const proc = byPid.get(cur)
+        if (!proc) return cur
+        if (proc.ppid === ownPid) return cur
+        const parent = byPid.get(proc.ppid)
+        if (!parent || parent.pid === cur) return cur
+        cur = parent.pid
+      }
+      return cur
+    }
+    for (const row of rows) row.treeId = `tree:${treeRootOf(row.pid)}`
+
+    const byTree = new Map()
+    for (const row of rows) {
+      if (!byTree.has(row.treeId)) byTree.set(row.treeId, [])
+      byTree.get(row.treeId).push(row)
+    }
+    const groups = []
+    for (const [treeId, members] of byTree) {
+      const memberPids = new Set(members.map((m) => m.pid))
+      const heads = members.filter((m) => !memberPids.has(m.ppid))
+      const head = (heads.length ? heads : members).slice().sort((a, b) => b.etimeSeconds - a.etimeSeconds)[0]
+      const ports = [...new Set(members.flatMap((m) => m.ports))].sort((a, b) => a - b)
+      const blocking = members.find((m) => !m.killable)
+      const origin = members.some((m) => m.origin === 'dsh') ? 'dsh' : 'external'
+      groups.push({
+        id: treeId,
+        treeId,
+        rootPid: head.pid,
+        label: head.project || head.label,
+        project: head.project,
+        command: head.command,
+        cwd: head.cwd || null,
+        origin,
+        ports,
+        listening: ports.length > 0,
+        procCount: members.length,
+        memberPids: [...memberPids],
+        rssMB: Math.round(members.reduce((n, m) => n + m.rssMB, 0) * 10) / 10,
+        cpu: Math.round(members.reduce((n, m) => n + m.cpu, 0) * 10) / 10,
+        etimeSeconds: head.etimeSeconds,
+        etimeText: head.etimeText,
+        killable: !blocking,
+        guard: blocking ? blocking.guard : null,
+      })
+    }
+    groups.sort((a, b) => {
+      if (a.origin !== b.origin) return a.origin === 'dsh' ? -1 : 1
+      const ap = a.ports[0] ?? 0
+      const bp = b.ports[0] ?? 0
+      if (ap !== bp) return ap - bp
+      return b.procCount - a.procCount
+    })
+
     const dshRows = rows.filter((r) => r.origin === 'dsh')
     const snapshot = {
       ok: true,
@@ -511,11 +570,14 @@ function createScanner() {
         cwd: (() => { try { return process.cwd() } catch { return null } })(),
       },
       rows,
+      groups,
       summary: {
         total: rows.length,
         dsh: dshRows.length,
         external: rows.length - dshRows.length,
-        ports: rows.reduce((n, r) => n + r.ports.length, 0),
+        groups: groups.length,
+        dshGroups: groups.filter((g) => g.origin === 'dsh').length,
+        ports: groups.reduce((n, g) => n + g.ports.length, 0),
         rssMB: Math.round(rows.reduce((n, r) => n + r.rssMB, 0)),
       },
       warnings,
@@ -626,6 +688,62 @@ async function stopTarget(scanner, { pid, force = false, group } = {}) {
   }
 }
 
+/**
+ * 停一整棵启动树：逐个成员发信号，**不做进程组升级**。
+ * 一条命令拉起的进程可能横跨好几个进程组（turbo 就是这么干的），
+ * 按 pid 精确收敛才不会连带停掉同一进程组里别的命令。
+ */
+async function stopTree(scanner, { treeId, force = false } = {}) {
+  if (!treeId) return { ok: false, message: '缺少 treeId' }
+  const snapshot = await scanner.scan(true)
+  const members = snapshot.rows.filter((r) => r.treeId === treeId)
+  if (!members.length) return { ok: false, message: '这棵启动树已经不在雷达里了（可能已经退出）' }
+  const blocking = members.find((m) => !m.killable)
+  if (blocking) return { ok: false, message: blocking.guard }
+
+  const head = members.slice().sort((a, b) => b.etimeSeconds - a.etimeSeconds)[0]
+  const signal = force ? '-KILL' : '-TERM'
+  const steps = []
+  // 深的先停：父进程先走会让子进程被换父，后面按 pid 就找不到了
+  for (const m of members.slice().sort((a, b) => b.pid - a.pid)) {
+    try {
+      await exec(KILL_BIN, [signal, String(m.pid)], { timeout: 3000 })
+      steps.push({ signal: force ? 'SIGKILL' : 'SIGTERM', target: String(m.pid) })
+    } catch (error) {
+      if (!/No such process|ESRCH/i.test(String(error?.stderr || error?.message || ''))) {
+        return { ok: false, message: `发送信号失败（pid ${m.pid}）：${error?.message || error}`, steps }
+      }
+    }
+  }
+
+  const survivors = () => members.filter((m) => alive(m.pid))
+  if (!force) {
+    const deadline = Date.now() + KILL_GRACE_MS
+    while (Date.now() < deadline) {
+      if (!survivors().length) break
+      await sleep(120)
+    }
+    if (survivors().length) {
+      return {
+        ok: false,
+        needsForce: true,
+        treeId,
+        steps,
+        message: `${head.project || head.label || '启动树'} 里还有 ${survivors().length} 个进程没响应 SIGTERM，可以用「强制终止」升级为 SIGKILL。`,
+      }
+    }
+  }
+
+  scanner.invalidate()
+  return {
+    ok: true,
+    treeId,
+    steps,
+    stopped: members.map((m) => m.pid),
+    message: `已停止 ${head.project || head.label || '启动树'} 的整棵启动树（${members.length} 个进程）`,
+  }
+}
+
 async function stopAllDsh(scanner, { force = false } = {}) {
   const snapshot = await scanner.scan(true)
   const targets = snapshot.rows.filter((r) => r.origin === 'dsh' && r.killable)
@@ -700,26 +818,30 @@ async function dispatch(scanner, method, params) {
     }
     case 'kill':
       return stopTarget(scanner, { pid: params?.pid, force: Boolean(params?.force) })
+    case 'killTree':
+      return stopTree(scanner, { treeId: params?.treeId, force: Boolean(params?.force) })
     case 'stopAll':
       return stopAllDsh(scanner, { force: Boolean(params?.force) })
     default:
-      return { ok: false, message: `未知方法 "${method ?? ''}"（可用：snapshot、kill、stopAll）` }
+      return { ok: false, message: `未知方法 "${method ?? ''}"（可用：snapshot、kill、killTree、stopAll）` }
   }
 }
 
 // ── 给模型的工具 ──────────────────────────────────────────────────────────────
 
 function renderList(snap) {
-  if (!snap.rows.length) {
+  const groups = snap.groups || []
+  if (!groups.length) {
     return '应用雷达：现在后台没有由 DSH 启动的长期进程。'
   }
-  const lines = snap.rows.map((row) => {
-    const port = row.ports.length ? row.ports.map((p) => `:${p}`).join(' ') : '无端口'
-    const where = row.label || '未知项目'
-    return `- ${port}  ${where}  [${row.origin === 'dsh' ? 'DSH 启动' : '外部进程'}]  pid ${row.pid}  已运行 ${row.etimeText || '—'}  内存 ${row.rssMB}MB${row.killable ? '' : `  (不可停止：${row.guard})`}`
+  const lines = groups.map((g) => {
+    const port = g.ports.length ? g.ports.map((p) => `:${p}`).join(' ') : '无端口'
+    const procs = g.procCount > 1 ? `（${g.procCount} 个进程）` : ''
+    return `- ${port}  ${g.label}${procs}  [${g.origin === 'dsh' ? 'DSH 启动' : '外部进程'}]  pid ${g.rootPid}  已运行 ${g.etimeText}  内存 ${g.rssMB}MB${g.killable ? '' : `  (不可停止：${g.guard})`}`
   })
+  const sum = snap.summary
   return [
-    `应用雷达：共 ${snap.summary.total} 个后台进程（DSH 启动 ${snap.summary.dsh} 个，占用 ${snap.summary.ports} 个端口，合计 ${snap.summary.rssMB}MB 内存）。`,
+    `应用雷达：共 ${sum.groups} 棵启动树 / ${sum.total} 个后台进程（DSH 启动 ${sum.dshGroups} 棵 / ${sum.dsh} 个进程，占用 ${sum.ports} 个端口，合计 ${sum.rssMB}MB 内存）。`,
     ...lines,
   ].join('\n')
 }
@@ -762,7 +884,8 @@ export function apply(ctx) {
     name: 'app_radar',
     description: '应用雷达：列出这台机器上由 DSH 启动的后台进程和它们占用的端口，并可以强制停止。'
       + '当用户在 DSH 里跑过 dev server、脚本或长期任务，想确认「后台到底还有什么在跑」或要收尾时用它。'
-      + 'action=list 查看，action=kill 停一个（pid），action=stop_all 停掉所有由 DSH 启动的。',
+      + '一条命令拉起的进程树会归并成一棵「启动树」（monorepo 的 pnpm dev 常见：一个项目十几个进程）。'
+      + 'action=list 查看，action=kill 停一个进程（pid）或整棵启动树（tree_id），action=stop_all 停掉所有由 DSH 启动的。',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -772,7 +895,11 @@ export function apply(ctx) {
           enum: ['list', 'kill', 'stop_all'],
           description: 'list 列举；kill 停止指定 pid；stop_all 停止所有由 DSH 启动的进程',
         },
-        pid: { type: 'integer', description: 'action=kill 时要停止的进程 pid' },
+        pid: { type: 'integer', description: 'action=kill 时要停止的单个进程 pid' },
+        tree_id: {
+          type: 'string',
+          description: 'action=kill 时改为停一整棵启动树：用 list 结果里的 tree 标识（形如 tree:51234），会停掉该树下的所有进程',
+        },
         force: { type: 'boolean', description: '直接发 SIGKILL，不先尝试 SIGTERM' },
       },
       required: ['action'],
@@ -800,8 +927,8 @@ export function apply(ctx) {
         return { ok: true, message: text, summary: snap.summary }
       }
       if (action === 'kill') {
-        const result = await stopTarget(scanner, { pid: args?.pid, force: Boolean(args?.force) })
-        return result
+        if (args?.tree_id) return stopTree(scanner, { treeId: args.tree_id, force: Boolean(args?.force) })
+        return stopTarget(scanner, { pid: args?.pid, force: Boolean(args?.force) })
       }
       if (action === 'stop_all') {
         const result = await stopAllDsh(scanner, { force: Boolean(args?.force) })
