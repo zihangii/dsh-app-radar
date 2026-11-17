@@ -514,6 +514,19 @@ function createScanner() {
     }
     for (const row of rows) row.treeId = `tree:${treeRootOf(row.pid)}`
 
+    // 整棵树的全部进程（含没显示出来的 shell / turbo 包装进程）：
+    // 停整棵树时必须连它们一起收，否则 shell 会留在后台，树也就没真停掉。
+    const treeMembers = new Map()
+    if (table) {
+      for (const proc of byPid.values()) {
+        const pid = proc.pid
+        if (pid === ownPid || pid <= 1 || ancestors.has(pid)) continue
+        const root = treeRootOf(pid)
+        if (!treeMembers.has(root)) treeMembers.set(root, [])
+        treeMembers.get(root).push(pid)
+      }
+    }
+
     const byTree = new Map()
     for (const row of rows) {
       if (!byTree.has(row.treeId)) byTree.set(row.treeId, [])
@@ -540,6 +553,7 @@ function createScanner() {
         listening: ports.length > 0,
         procCount: members.length,
         memberPids: [...memberPids],
+        allPids: (treeMembers.get(Number(treeId.slice('tree:'.length))) || [...memberPids]).sort((a, b) => a - b),
         rssMB: Math.round(members.reduce((n, m) => n + m.rssMB, 0) * 10) / 10,
         cpu: Math.round(members.reduce((n, m) => n + m.cpu, 0) * 10) / 10,
         etimeSeconds: head.etimeSeconds,
@@ -696,27 +710,30 @@ async function stopTarget(scanner, { pid, force = false, group } = {}) {
 async function stopTree(scanner, { treeId, force = false } = {}) {
   if (!treeId) return { ok: false, message: '缺少 treeId' }
   const snapshot = await scanner.scan(true)
+  const group = (snapshot.groups || []).find((g) => g.treeId === treeId)
   const members = snapshot.rows.filter((r) => r.treeId === treeId)
-  if (!members.length) return { ok: false, message: '这棵启动树已经不在雷达里了（可能已经退出）' }
+  if (!group && !members.length) return { ok: false, message: '这棵启动树已经不在雷达里了（可能已经退出）' }
   const blocking = members.find((m) => !m.killable)
   if (blocking) return { ok: false, message: blocking.guard }
 
-  const head = members.slice().sort((a, b) => b.etimeSeconds - a.etimeSeconds)[0]
+  const head = group || members.slice().sort((a, b) => b.etimeSeconds - a.etimeSeconds)[0]
+  // 连没显示出来的包装进程一起停：只停看得见的那几个，shell 会留在后台
+  const pids = ((group && group.allPids && group.allPids.length) ? group.allPids : members.map((m) => m.pid)).slice()
   const signal = force ? '-KILL' : '-TERM'
   const steps = []
   // 深的先停：父进程先走会让子进程被换父，后面按 pid 就找不到了
-  for (const m of members.slice().sort((a, b) => b.pid - a.pid)) {
+  for (const pid of pids.sort((a, b) => b - a)) {
     try {
-      await exec(KILL_BIN, [signal, String(m.pid)], { timeout: 3000 })
-      steps.push({ signal: force ? 'SIGKILL' : 'SIGTERM', target: String(m.pid) })
+      await exec(KILL_BIN, [signal, String(pid)], { timeout: 3000 })
+      steps.push({ signal: force ? 'SIGKILL' : 'SIGTERM', target: String(pid) })
     } catch (error) {
       if (!/No such process|ESRCH/i.test(String(error?.stderr || error?.message || ''))) {
-        return { ok: false, message: `发送信号失败（pid ${m.pid}）：${error?.message || error}`, steps }
+        return { ok: false, message: `发送信号失败（pid ${pid}）：${error?.message || error}`, steps }
       }
     }
   }
 
-  const survivors = () => members.filter((m) => alive(m.pid))
+  const survivors = () => pids.filter((pid) => alive(pid))
   if (!force) {
     const deadline = Date.now() + KILL_GRACE_MS
     while (Date.now() < deadline) {
@@ -739,25 +756,28 @@ async function stopTree(scanner, { treeId, force = false } = {}) {
     ok: true,
     treeId,
     steps,
-    stopped: members.map((m) => m.pid),
-    message: `已停止 ${head.project || head.label || '启动树'} 的整棵启动树（${members.length} 个进程）`,
+    stopped: pids,
+    message: `已停止 ${head.project || head.label || '启动树'} 的整棵启动树（${pids.length} 个进程）`,
   }
 }
 
 async function stopAllDsh(scanner, { force = false } = {}) {
   const snapshot = await scanner.scan(true)
-  const targets = snapshot.rows.filter((r) => r.origin === 'dsh' && r.killable)
+  const trees = (snapshot.groups || []).filter((g) => g.origin === 'dsh' && g.killable)
+  if (!trees.length) return { ok: true, message: '没有需要停止的进程', results: [] }
+
   const results = []
-  for (const row of targets) {
-    results.push({ pid: row.pid, project: row.label, ...(await stopTarget(scanner, { pid: row.pid, force })) })
+  let procs = 0
+  for (const tree of trees) {
+    const result = await stopTree(scanner, { treeId: tree.treeId, force })
+    results.push({ treeId: tree.treeId, label: tree.label, ...result })
+    if (result.ok) procs += ((tree.allPids && tree.allPids.length) || tree.memberPids || []).length
   }
   const killed = results.filter((r) => r.ok).length
   const failed = results.length - killed
   return {
     ok: failed === 0,
-    message: results.length === 0
-      ? '没有需要停止的进程'
-      : `已停止 ${killed} 个由 DSH 启动的进程${failed ? `，${failed} 个没停掉` : ''}`,
+    message: `已停止 ${killed} 棵由 DSH 启动的启动树（${procs} 个进程）${failed ? `，${failed} 棵没停干净` : ''}`,
     results,
   }
 }

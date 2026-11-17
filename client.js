@@ -576,7 +576,7 @@ window.__ModuleLoader__.load({
                 h('dd', null, (confirm.row ? (confirm.row.project || confirm.row.label) : confirm.group.label) || '—'),
                 h('dt', null, 'PID'),
                 h('dd', null, confirm.mode === 'tree'
-                  ? `${confirm.group.rootPid}（${confirm.group.procCount} ${t.procsSub}）`
+                  ? `${confirm.group.rootPid}（${(confirm.group.allPids && confirm.group.allPids.length) || confirm.group.procCount} ${t.procsSub}）`
                   : `${confirm.row ? confirm.row.pid : confirm.group.rootPid}${(confirm.row ? confirm.row.groupKill : false) ? ` / PGID ${confirm.row.pgid}` : ''}`),
                 h('dt', null, t.colUptime),
                 h('dd', null, (confirm.row ? confirm.row.etimeText : confirm.group.etimeText) || '—'),
